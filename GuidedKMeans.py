@@ -20,6 +20,9 @@ class GuidedKMeans:
             np.random.seed(self.random_state)
         n = X.shape[0]
         w = w / w.sum()
+        # 防止浮点误差导致 w 不精确等于 1（np.random.choice 严格要求 sum=1）
+        w = np.maximum(w, 0.0)
+        w[-1] += 1.0 - w.sum()
         centers = np.zeros((self.n_clusters, X.shape[1]))
 
         centers[0] = X[np.random.choice(n, p=w)]
@@ -28,7 +31,15 @@ class GuidedKMeans:
             d = np.sum((X - centers[i - 1]) ** 2, axis=1)
             dist2 = np.minimum(dist2, d)
             probs = dist2 * w                       # 加权采样
-            probs = probs / max(probs.sum(), 1e-12)
+            # ★ 鲁棒归一化：深层残差极小或全 0 时 probs.sum() 可能下溢，
+            #   退化为均匀分布，避免 np.random.choice 抛 "probabilities do not sum to 1"
+            s = probs.sum()
+            if not np.isfinite(s) or s <= 0:
+                probs = np.ones(n) / n
+            else:
+                probs = probs / s
+                probs = np.maximum(probs, 0.0)
+                probs[-1] += 1.0 - probs.sum()       # 强制精确 sum=1
             centers[i] = X[np.random.choice(n, p=probs)]
         return centers
 

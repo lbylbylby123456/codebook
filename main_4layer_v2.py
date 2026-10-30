@@ -26,11 +26,10 @@ v2 改动（三处）
    推理期理论最大 debias_label 更大时，码本上界也有保障。
    同时 clip 上限也改为 300，与码本上界对齐。
 
-③ L3/L4 非对称扩容 CODEBOOK_SIZE=[64, 64, 96, 96]
-   v1 中 L2 残差负侧最深 −1.05、正侧最深 +2.24（正侧约 2× 负侧），
-   但 L3/L4 接到的是 L2 之后更细的残差，正负基本对称。
-   给 L3/L4 各扩 32 个码字（64→96），相当于粒度提升 1.5×，
-   高偏差价格桶（pb=192, pb=1000）的精修分辨率更高。
+③ 四层码本统一 COODEBOOK_SIZE=[64, 64, 64, 64]
+   L3/L4 保持 64 码字，与 L1/L2 完全一致。
+   每层编码空间宽度统一，推理端固定按 64 取码，无需按层特判。
+   精度提升全部来自 tail 三段式锚定 + 上界扩容，不靠加宽码本。
 
 各层设计职责
 ─────────────────────────────
@@ -46,13 +45,13 @@ v2 改动（三处）
       · 64 个码字覆盖 [−1.05, +2.24]，修复 L1 粗量化误差
       · ~16% 普通样本在此退出
 
-  L3  量化 L2 残差（±0.3 量级，中细粒度，扩容至 96 码字）
-      · 96 个码字 → 粒度从 0.005 降至 0.003/code
+  L3  量化 L2 残差（±0.3 量级，中细粒度）
+      · 64 个码字覆盖 L2 之后的残差分布
       · ~76% 样本在此退出（大量高偏差桶也在此收敛）
 
-  L4  量化 L3 残差（±0.05 量级，细粒度兜底，扩容至 96 码字）
-      · 96 个码字 → 粒度 ~0.0008/code
-      · 约 670 个极端样本参与，码字 100% 利用
+  L4  量化 L3 残差（±0.05 量级，细粒度兜底）
+      · 64 个码字 → 粒度 ~0.001/code
+      · 仅少数极端样本参与，作为最后一道兼底
 """
 import os, pickle, logging, sys
 import numpy as np
@@ -70,10 +69,10 @@ SAVE_DIR   = "./models_guided_4layer_v2"  # ★ 独立目录，不覆盖 v1
 
 # ─── 码本配置 ─────────────────────────────────────────────────────────────────
 #
-#  ★ 非对称码本大小：L1/L2 保持 64，L3/L4 扩容至 96
-#    总码字数：64+64+96+96 = 320（与 5 层版本相同，但码字全部有效利用）
+#  4 层统一使用 64 个码字，总共 4×64=256 个码字。
+#  每层编码空间宽度一致，推理端无需按层特判。
 #
-CODEBOOK_SIZE = [64, 64, 96, 96]
+CODEBOOK_SIZE = [64, 64, 64, 64]
 
 #  ★ 推理上界从 100 扩充到 300
 #    v1 中 data_max=49.64，上界 100 对推理期 >100 的商品仍有风险；
@@ -151,7 +150,7 @@ def main():
 
     model = GuidedResCluster(
         n_layers=4,
-        codebook_size=CODEBOOK_SIZE,        # [64, 64, 96, 96]，L3/L4 扩容至 96
+        codebook_size=CODEBOOK_SIZE,        # [64, 64, 64, 64]，每层统一 64 码字
         dim=1,
         stat_table=stat_table,
         weight_alpha=1.0,
@@ -228,8 +227,8 @@ def main():
     layer_descs = [
         f"L1 信号层  [0,{TAIL_HARD_MAX:.0f}] 三段式锚定",
         "L2 中等修正 64码字 残差量化",
-        "L3 中细粒度 96码字 扩容",
-        "L4 细粒度   96码字 兜底高偏差",
+        "L3 中细粒度 64码字 残差量化",
+        "L4 细粒度   64码字 兜底高偏差",
     ]
     for l in range(model.n_layers):
         active = int(num_samples[l, 0])
@@ -322,17 +321,17 @@ def main():
     ws = wb.active
     ws.title = 'codebooks_4layer_v2'
 
-    n_codes = max(CODEBOOK_SIZE)   # = 96
+    n_codes = max(CODEBOOK_SIZE)   # = 64
     layers  = [np.asarray(model.codebooks[l]).reshape(-1) for l in range(model.n_layers)]
 
     ROW_FILLS = [
         PatternFill("solid", fgColor="D9EAD3"),   # L1 绿：信号层
         PatternFill("solid", fgColor="CFE2F3"),   # L2 蓝：中等修正
-        PatternFill("solid", fgColor="FFF2CC"),   # L3 黄：中细粒度（96码字）
-        PatternFill("solid", fgColor="FCE5CD"),   # L4 橙：细粒度兜底（96码字）
+        PatternFill("solid", fgColor="FFF2CC"),   # L3 黄：中细粒度
+        PatternFill("solid", fgColor="FCE5CD"),   # L4 橙：细粒度兜底
     ]
 
-    # 第 1 行：表头（加背景区分 L3/L4 扩容段）
+    # 第 1 行：表头（4 层各 64 列，idx + code[0..63]）
     header_row = ['idx'] + list(range(n_codes))
     ws.append(header_row)
     hdr_fill = PatternFill("solid", fgColor="D9D9D9")
